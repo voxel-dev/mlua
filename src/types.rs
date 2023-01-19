@@ -180,6 +180,23 @@ impl RegistryKey {
 pub(crate) struct LuaRef<'lua> {
     pub(crate) lua: &'lua Lua,
     pub(crate) index: c_int,
+    pub(crate) drop: bool,
+}
+
+impl<'lua> LuaRef<'lua> {
+    pub(crate) const fn new(lua: &'lua Lua, index: c_int) -> Self {
+        LuaRef {
+            lua,
+            index,
+            drop: true,
+        }
+    }
+
+    #[cfg(feature = "unstable")]
+    #[inline]
+    pub(crate) fn into_owned(self) -> LuaOwnedRef {
+        self.lua.make_owned_ref(self)
+    }
 }
 
 impl<'lua> fmt::Debug for LuaRef<'lua> {
@@ -196,7 +213,7 @@ impl<'lua> Clone for LuaRef<'lua> {
 
 impl<'lua> Drop for LuaRef<'lua> {
     fn drop(&mut self) {
-        if self.index > 0 {
+        if self.drop {
             self.lua.drop_ref(self);
         }
     }
@@ -205,12 +222,83 @@ impl<'lua> Drop for LuaRef<'lua> {
 impl<'lua> PartialEq for LuaRef<'lua> {
     fn eq(&self, other: &Self) -> bool {
         let lua = self.lua;
+        let state = lua.state();
         unsafe {
-            let _sg = StackGuard::new(lua.state);
-            assert_stack(lua.state, 2);
+            let _sg = StackGuard::new(state);
+            assert_stack(state, 2);
             lua.push_ref(self);
             lua.push_ref(other);
-            ffi::lua_rawequal(lua.state, -1, -2) == 1
+            ffi::lua_rawequal(state, -1, -2) == 1
         }
     }
+}
+
+#[cfg(feature = "unstable")]
+pub(crate) struct LuaOwnedRef {
+    pub(crate) lua: Lua,
+    pub(crate) index: c_int,
+    _non_send: std::marker::PhantomData<*const ()>,
+}
+
+#[cfg(feature = "unstable")]
+impl fmt::Debug for LuaOwnedRef {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "OwnedRef({})", self.index)
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl Clone for LuaOwnedRef {
+    fn clone(&self) -> Self {
+        self.lua.make_owned_ref(self.to_ref().clone())
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl Drop for LuaOwnedRef {
+    fn drop(&mut self) {
+        drop(LuaRef {
+            lua: &self.lua,
+            index: self.index,
+            drop: true,
+        });
+    }
+}
+
+#[cfg(feature = "unstable")]
+impl LuaOwnedRef {
+    pub(crate) const fn new(lua: Lua, index: c_int) -> Self {
+        #[cfg(feature = "send")]
+        {
+            let _lua = lua;
+            let _index = index;
+            panic!("mlua must be compiled without \"send\" feature to use Owned types");
+        }
+
+        #[cfg(not(feature = "send"))]
+        LuaOwnedRef {
+            lua,
+            index,
+            _non_send: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) const fn to_ref(&self) -> LuaRef {
+        LuaRef {
+            lua: &self.lua,
+            index: self.index,
+            drop: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod assertions {
+    use super::*;
+
+    static_assertions::assert_impl_all!(RegistryKey: Send, Sync);
+    static_assertions::assert_not_impl_any!(LuaRef: Send);
+
+    #[cfg(feature = "unstable")]
+    static_assertions::assert_not_impl_any!(LuaOwnedRef: Send);
 }

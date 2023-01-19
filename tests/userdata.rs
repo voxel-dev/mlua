@@ -12,8 +12,8 @@ use std::{cell::RefCell, rc::Rc};
 use std::sync::atomic::{AtomicI64, Ordering};
 
 use mlua::{
-    AnyUserData, Error, ExternalError, Function, Lua, MetaMethod, Nil, Result, String, UserData,
-    UserDataFields, UserDataMethods, Value,
+    AnyUserData, Error, ExternalError, FromLua, Function, Lua, MetaMethod, Nil, Result, String,
+    UserData, UserDataFields, UserDataMethods, Value,
 };
 
 #[test]
@@ -95,6 +95,15 @@ fn test_metamethods() -> Result<()> {
     #[derive(Copy, Clone)]
     struct MyUserData(i64);
 
+    impl<'lua> FromLua<'lua> for MyUserData {
+        fn from_lua(value: Value<'lua>, _: &'lua Lua) -> Result<Self> {
+            match value {
+                Value::UserData(ud) => Ok(ud.borrow::<Self>()?.clone()),
+                _ => unreachable!(),
+            }
+        }
+    }
+
     impl UserData for MyUserData {
         fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_method("get", |_, data, ()| Ok(data.0));
@@ -113,7 +122,7 @@ fn test_metamethods() -> Result<()> {
                 if index.to_str()? == "inner" {
                     Ok(data.0)
                 } else {
-                    Err("no such custom index".to_lua_err())
+                    Err("no such custom index".into_lua_err())
                 }
             });
             #[cfg(any(
@@ -305,21 +314,19 @@ fn test_userdata_take() -> Result<()> {
     fn check_userdata_take(lua: &Lua, userdata: AnyUserData, rc: Arc<i64>) -> Result<()> {
         lua.globals().set("userdata", userdata.clone())?;
         assert_eq!(Arc::strong_count(&rc), 3);
-        let userdata_copy = userdata.clone();
         {
             let _value = userdata.borrow::<MyUserdata>()?;
             // We should not be able to take userdata if it's borrowed
-            match userdata_copy.take::<MyUserdata>() {
+            match userdata.take::<MyUserdata>() {
                 Err(Error::UserDataBorrowMutError) => {}
                 r => panic!("expected `UserDataBorrowMutError` error, got {:?}", r),
             }
         }
 
-        let value = userdata_copy.take::<MyUserdata>()?;
+        let value = userdata.take::<MyUserdata>()?;
         assert_eq!(*value.0, 18);
         drop(value);
-        lua.gc_collect()?;
-        assert_eq!(Arc::strong_count(&rc), 1);
+        assert_eq!(Arc::strong_count(&rc), 2);
 
         match userdata.borrow::<MyUserdata>() {
             Err(Error::UserDataDestructed) => {}
@@ -332,6 +339,13 @@ fn test_userdata_take() -> Result<()> {
             },
             r => panic!("improper return for destructed userdata: {:?}", r),
         }
+
+        drop(userdata);
+        lua.globals().raw_remove("userdata")?;
+        lua.gc_collect()?;
+        lua.gc_collect()?;
+        assert_eq!(Arc::strong_count(&rc), 1);
+
         Ok(())
     }
 
@@ -403,9 +417,9 @@ fn test_user_values() -> Result<()> {
     ud.set_named_user_value("name", "alex")?;
     ud.set_named_user_value("age", 10)?;
 
-    assert_eq!(ud.get_named_user_value::<_, String>("name")?, "alex");
-    assert_eq!(ud.get_named_user_value::<_, i32>("age")?, 10);
-    assert_eq!(ud.get_named_user_value::<_, Value>("nonexist")?, Value::Nil);
+    assert_eq!(ud.get_named_user_value::<String>("name")?, "alex");
+    assert_eq!(ud.get_named_user_value::<i32>("age")?, 10);
+    assert_eq!(ud.get_named_user_value::<Value>("nonexist")?, Value::Nil);
 
     Ok(())
 }
@@ -529,7 +543,7 @@ fn test_metatable() -> Result<()> {
         fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
             methods.add_function("my_type_name", |_, data: AnyUserData| {
                 let metatable = data.get_metatable()?;
-                metatable.get::<_, String>("__type_name")
+                metatable.get::<String>("__type_name")
             });
         }
     }
@@ -547,7 +561,7 @@ fn test_metatable() -> Result<()> {
     let ud: AnyUserData = globals.get("ud")?;
     let metatable = ud.get_metatable()?;
 
-    match metatable.get::<_, Value>("__gc") {
+    match metatable.get::<Value>("__gc") {
         Ok(_) => panic!("expected MetaMethodRestricted, got no error"),
         Err(Error::MetaMethodRestricted(_)) => {}
         Err(e) => panic!("expected MetaMethodRestricted, got {:?}", e),
@@ -561,11 +575,10 @@ fn test_metatable() -> Result<()> {
 
     let mut methods = metatable
         .pairs()
-        .into_iter()
         .map(|kv: Result<(_, Value)>| Ok(kv?.0))
         .collect::<Result<Vec<_>>>()?;
-    methods.sort_by_cached_key(|k| k.name().to_owned());
-    assert_eq!(methods, vec![MetaMethod::Index, "__type_name".into()]);
+    methods.sort();
+    assert_eq!(methods, vec!["__index", "__type_name"]);
 
     #[derive(Copy, Clone)]
     struct MyUserData2(i64);

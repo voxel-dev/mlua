@@ -1,7 +1,7 @@
 use proc_macro::TokenStream;
 use proc_macro2::{Ident, Span};
 use quote::quote;
-use syn::{parse_macro_input, AttributeArgs, Error, ItemFn};
+use syn::{parse_macro_input, AttributeArgs, Error, ItemFn, Lit, Meta, NestedMeta, Result};
 
 #[cfg(feature = "macros")]
 use {
@@ -9,19 +9,53 @@ use {
     proc_macro_error::proc_macro_error,
 };
 
+#[derive(Default)]
+struct ModuleArgs {
+    name: Option<Ident>,
+}
+
+impl ModuleArgs {
+    fn parse(args: AttributeArgs) -> Result<Self> {
+        let mut ret = Self::default();
+
+        for arg in args {
+            match arg {
+                NestedMeta::Meta(Meta::NameValue(meta)) => {
+                    if meta.path.is_ident("name") {
+                        match meta.lit {
+                            Lit::Str(val) => {
+                                ret.name = Some(val.parse()?);
+                            }
+                            _ => {
+                                return Err(Error::new_spanned(meta.lit, "expected string literal"))
+                            }
+                        }
+                    } else {
+                        return Err(Error::new_spanned(meta.path, "expected `name`"));
+                    }
+                }
+                _ => {
+                    return Err(Error::new_spanned(arg, "invalid argument"));
+                }
+            }
+        }
+
+        Ok(ret)
+    }
+}
+
 #[proc_macro_attribute]
 pub fn lua_module(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = parse_macro_input!(attr as AttributeArgs);
+    let args = match ModuleArgs::parse(args) {
+        Ok(args) => args,
+        Err(err) => return err.to_compile_error().into(),
+    };
     let func = parse_macro_input!(item as ItemFn);
 
-    if !args.is_empty() {
-        let err = Error::new(Span::call_site(), "the macro does not support arguments")
-            .to_compile_error();
-        return err.into();
-    }
-
     let func_name = func.sig.ident.clone();
-    let ext_entrypoint_name = Ident::new(&format!("luaopen_{}", func_name), Span::call_site());
+    let module_name = args.name.unwrap_or_else(|| func_name.clone());
+    let ext_entrypoint_name = Ident::new(&format!("luaopen_{module_name}"), Span::call_site());
 
     let wrapped = quote! {
         ::mlua::require_module_feature!();
@@ -64,36 +98,35 @@ pub fn chunk(input: TokenStream) -> TokenStream {
         use ::mlua::{AsChunk, ChunkMode, Lua, Result, Value};
         use ::std::borrow::Cow;
         use ::std::io::Result as IoResult;
-        use ::std::marker::PhantomData;
         use ::std::sync::Mutex;
 
-        fn annotate<'a, F: FnOnce(&'a Lua) -> Result<Value<'a>>>(f: F) -> F { f }
+        struct InnerChunk<F: for <'a> FnOnce(&'a Lua) -> Result<Value<'a>>>(Mutex<Option<F>>);
 
-        struct InnerChunk<'a, F: FnOnce(&'a Lua) -> Result<Value<'a>>>(Mutex<Option<F>>, PhantomData<&'a ()>);
-
-        impl<'lua, F> AsChunk<'lua> for InnerChunk<'lua, F>
+        impl<F> AsChunk<'static> for InnerChunk<F>
         where
-            F: FnOnce(&'lua Lua) -> Result<Value<'lua>>,
+            F: for <'a> FnOnce(&'a Lua) -> Result<Value<'a>>,
         {
-            fn source(&self) -> IoResult<Cow<[u8]>> {
-                Ok(Cow::Borrowed((#source).as_bytes()))
-            }
-
-            fn env(&self, lua: &'lua Lua) -> Result<Option<Value<'lua>>> {
+            fn env<'lua>(&self, lua: &'lua Lua) -> Result<Value<'lua>> {
                 if #caps_len > 0 {
                     if let Ok(mut make_env) = self.0.lock() {
                         if let Some(make_env) = make_env.take() {
-                            return make_env(lua).map(Some);
+                            return make_env(lua);
                         }
                     }
                 }
-                Ok(None)
+                Ok(Value::Nil)
             }
 
             fn mode(&self) -> Option<ChunkMode> {
                 Some(ChunkMode::Text)
             }
+
+            fn source(self) -> IoResult<Cow<'static, [u8]>> {
+                Ok(Cow::Borrowed((#source).as_bytes()))
+            }
         }
+
+        fn annotate<F: for<'a> FnOnce(&'a Lua) -> Result<Value<'a>>>(f: F) -> F { f }
 
         let make_env = annotate(move |lua: &Lua| -> Result<Value> {
             let globals = lua.globals();
@@ -109,7 +142,7 @@ pub fn chunk(input: TokenStream) -> TokenStream {
             Ok(Value::Table(env))
         });
 
-        &InnerChunk(Mutex::new(Some(make_env)), PhantomData)
+        InnerChunk(Mutex::new(Some(make_env)))
     }};
 
     wrapped_code.into()

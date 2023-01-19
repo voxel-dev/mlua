@@ -30,6 +30,20 @@ async fn test_async_function() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "unstable")]
+#[tokio::test]
+async fn test_async_function_wrap() -> Result<()> {
+    let lua = Lua::new();
+
+    let f = Function::wrap_async(|_, s: String| async move { Ok(s) });
+    lua.globals().set("f", f)?;
+
+    let res: String = lua.load(r#"f("hello")"#).eval_async().await?;
+    assert_eq!(res, "hello");
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_async_sleep() -> Result<()> {
     let lua = Lua::new();
@@ -263,7 +277,7 @@ async fn test_async_thread() -> Result<()> {
 
 #[tokio::test]
 async fn test_async_table() -> Result<()> {
-    let options = LuaOptions::new().thread_cache_size(4);
+    let options = LuaOptions::new().thread_pool_size(4);
     let lua = Lua::new_with(StdLib::ALL_SAFE, options)?;
 
     let table = lua.create_table()?;
@@ -311,8 +325,8 @@ async fn test_async_table() -> Result<()> {
 }
 
 #[tokio::test]
-async fn test_async_thread_cache() -> Result<()> {
-    let options = LuaOptions::new().thread_cache_size(4);
+async fn test_async_thread_pool() -> Result<()> {
+    let options = LuaOptions::new().thread_pool_size(4);
     let lua = Lua::new_with(StdLib::ALL_SAFE, options)?;
 
     let error_f = lua.create_async_function(|_, ()| async move {
@@ -439,7 +453,7 @@ async fn test_async_thread_error() -> Result<()> {
     let lua = Lua::new();
     let result = lua
         .load("function x(...) error(...) end x(...)")
-        .set_name("chunk")?
+        .set_name("chunk")
         .call_async::<_, ()>(MyUserData)
         .await;
     assert!(

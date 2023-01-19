@@ -308,7 +308,7 @@ fn test_error() -> Result<()> {
     .exec()?;
 
     let rust_error_function =
-        lua.create_function(|_, ()| -> Result<()> { Err(TestError.to_lua_err()) })?;
+        lua.create_function(|_, ()| -> Result<()> { Err(TestError.into_lua_err()) })?;
     globals.set("rust_error_function", rust_error_function)?;
 
     let no_error = globals.get::<_, Function>("no_error")?;
@@ -506,7 +506,7 @@ fn test_result_conversions() -> Result<()> {
 
     let err = lua.create_function(|_, ()| {
         Ok(Err::<String, _>(
-            "only through failure can we succeed".to_lua_err(),
+            "only through failure can we succeed".into_lua_err(),
         ))
     })?;
     let ok = lua.create_function(|_, ()| Ok(Ok::<_, Error>("!".to_owned())))?;
@@ -730,9 +730,9 @@ fn test_set_metatable_nil() -> Result<()> {
 fn test_named_registry_value() -> Result<()> {
     let lua = Lua::new();
 
-    lua.set_named_registry_value::<_, i32>("test", 42)?;
+    lua.set_named_registry_value::<i32>("test", 42)?;
     let f = lua.create_function(move |lua, ()| {
-        assert_eq!(lua.named_registry_value::<_, i32>("test")?, 42);
+        assert_eq!(lua.named_registry_value::<i32>("test")?, 42);
         Ok(())
     })?;
 
@@ -1072,7 +1072,7 @@ fn test_chunk_env() -> Result<()> {
         test_var = 1
     "#,
     )
-    .set_environment(env1.clone())?
+    .set_environment(env1.clone())
     .exec()?;
 
     lua.load(
@@ -1081,18 +1081,11 @@ fn test_chunk_env() -> Result<()> {
         test_var = 2
     "#,
     )
-    .set_environment(env2.clone())?
+    .set_environment(env2.clone())
     .exec()?;
 
-    assert_eq!(
-        lua.load("test_var").set_environment(env1)?.eval::<i32>()?,
-        1
-    );
-
-    assert_eq!(
-        lua.load("test_var").set_environment(env2)?.eval::<i32>()?,
-        2
-    );
+    assert_eq!(lua.load("test_var").set_environment(env1).eval::<i32>()?, 1);
+    assert_eq!(lua.load("test_var").set_environment(env2).eval::<i32>()?, 2);
 
     Ok(())
 }
@@ -1227,7 +1220,7 @@ fn test_inspect_stack() -> Result<()> {
         assert(logline("world") == '[string "chunk"]:12 world')
     "#,
     )
-    .set_name("chunk")?
+    .set_name("chunk")
     .exec()?;
 
     Ok(())
